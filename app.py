@@ -1,200 +1,186 @@
 import streamlit as st
 import google.generativeai as genai
 import PyPDF2 as pdf
+from PIL import Image
 import json
 import time
+import io
+import base64
 
-# --- Page Config (Must be first) ---
-st.set_page_config(page_title="Resume Matcher Pro", page_icon="", layout="wide")
+# --- Page Config ---
+st.set_page_config(page_title="ATS Scanner", layout="wide", initial_sidebar_state="expanded")
 
-# --- 🎨 Apple-Style Custom CSS ---
+# --- CSS for PDF Preview & Clean UI ---
 st.markdown("""
 <style>
-    /* Main Background */
-    .stApp {
-        background-color: #F5F5F7; /* Apple Light Grey */
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    .stProgress > div > div > div > div {
+        background-color: #00FF00;
     }
-
-    /* Card Styling */
-    .css-1r6slb0, .stMarkdown, .stText {
-        color: #1D1D1F;
-    }
-    
-    div.stButton > button {
-        background-color: #0071e3;
-        color: white;
-        border-radius: 18px;
-        padding: 0.5rem 1rem;
-        border: none;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        transition: all 0.3s ease;
-        font-weight: 500;
+    iframe {
         width: 100%;
+        min-height: 800px;
+        border: 1px solid #444;
+        border-radius: 5px;
     }
-    
-    div.stButton > button:hover {
-        background-color: #0077ED;
-        transform: scale(1.02);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-    }
-
-    /* Custom Card for Results */
-    .candidate-card {
-        background-color: white;
-        padding: 20px;
-        border-radius: 16px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-        margin-bottom: 15px;
-        border: 1px solid #E5E5EA;
-    }
-    
-    .match-score {
-        font-size: 24px;
-        font-weight: 700;
-        color: #0071e3;
-    }
-
-    /* Input Fields Polish */
-    .stTextInput > div > div > input, .stTextArea > div > div > textarea {
-        background-color: white;
-        border-radius: 12px;
-        border: 1px solid #D2D2D7;
-    }
-    
-    /* Remove default Streamlit chrome */
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- Logic: Secure API Handling ---
-# Try to get API key from Streamlit Secrets first, otherwise ask in Sidebar
-try:
-    api_key = st.secrets["GOOGLE_API_KEY"]
-    has_secret_key = True
-except FileNotFoundError:
-    api_key = None
-    has_secret_key = False
+# --- API Handling ---
+# Try secrets first, then sidebar
+api_key = st.secrets.get("GOOGLE_API_KEY")
 
-# --- Sidebar ---
 with st.sidebar:
-    st.title("⚙️ Settings")
+    st.title("🔧 Configuration")
+    if not api_key:
+        api_key = st.text_input("Gemini API Key", type="password")
     
-    if not has_secret_key:
-        api_key = st.text_input("Enter Gemini API Key", type="password")
-        st.caption("Get your key from Google AI Studio")
-    else:
-        st.success("✅ API Key loaded securely")
-
-    st.divider()
-    model_options = ["gemini-2.5-flash-preview-09-2025", "gemini-1.5-flash"]
-    model_name = st.selectbox("Model", model_options)
-    n_matches = st.slider("Candidates to find", 1, 20, 3)
+    model_name = st.selectbox("Model", ["gemini-2.5-flash-preview-09-2025", "gemini-1.5-flash", "gemini-1.5-pro"])
+    n_matches = st.number_input("Top N Candidates", min_value=1, value=3)
+    st.info("Supported: PDF, JPG, PNG")
 
 # --- Helper Functions ---
-def get_gemini_response(input_prompt, pdf_content, job_description):
+
+def get_gemini_response(input_prompt, content, job_description, is_image=False):
+    """
+    Handles both Text (PDF) and Image (JPG/PNG) inputs for Gemini.
+    """
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
-        combined_prompt = f"{input_prompt}\n\n### JOB DESCRIPTION:\n{job_description}\n\n### RESUME:\n{pdf_content}"
-        response = model.generate_content(combined_prompt)
+        
+        # Structure the payload based on input type
+        if is_image:
+            # content is a PIL Image object
+            prompt_parts = [input_prompt, "\n\n### JOB DESCRIPTION:\n", job_description, "\n\n### RESUME IMAGE:\n", content]
+        else:
+            # content is text string
+            prompt_parts = [input_prompt, "\n\n### JOB DESCRIPTION:\n", job_description, "\n\n### RESUME TEXT:\n", content]
+            
+        response = model.generate_content(prompt_parts)
         return response.text
     except Exception as e:
         return f"Error: {e}"
 
-def input_pdf_text(uploaded_file):
+def extract_pdf_text(uploaded_file):
     reader = pdf.PdfReader(uploaded_file)
     text = ""
     for page in reader.pages:
         text += page.extract_text()
     return text
 
-# --- Main UI ---
-st.markdown("<h1 style='text-align: center; color: #1D1D1F;'>Resume Matcher Pro</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #86868b; margin-bottom: 40px;'>Intelligent candidate screening powered by Gemini 2.5</p>", unsafe_allow_html=True)
+def pdf_to_base64(uploaded_file):
+    """Converts PDF to base64 for embedding in iframe"""
+    bytes_data = uploaded_file.getvalue()
+    base64_pdf = base64.b64encode(bytes_data).decode('utf-8')
+    return f'<iframe src="data:application/pdf;base64,{base64_pdf}" type="application/pdf"></iframe>'
 
-col1, col2 = st.columns([1, 1], gap="large")
+# --- Main Interface ---
 
-with col1:
-    st.markdown("### Job Description")
-    jd = st.text_area("Paste JD here", height=300, label_visibility="collapsed", placeholder="Paste the job description here...")
+st.header("ATS Resume Matcher & Viewer")
 
-with col2:
-    st.markdown("### Upload Resumes")
-    uploaded_files = st.file_uploader("Drop PDF files", type=["pdf"], accept_multiple_files=True, label_visibility="collapsed")
+col_jd, col_upload = st.columns([1, 1])
 
-# --- Processing ---
-if st.button("Analyze Candidates"):
-    if not api_key:
-        st.error("⚠️ Please provide an API Key.")
-    elif not uploaded_files or not jd:
-        st.warning("⚠️ Please provide both a JD and Resumes.")
+with col_jd:
+    jd = st.text_area("1. Job Description", height=200, placeholder="Paste JD here...")
+
+with col_upload:
+    uploaded_files = st.file_uploader("2. Upload Resumes", type=["pdf", "jpg", "jpeg", "png"], accept_multiple_files=True)
+
+# --- Logic ---
+
+if st.button("Analyze Resumes", type="primary"):
+    if not api_key or not uploaded_files or not jd:
+        st.error("Missing API Key, JD, or Resumes.")
     else:
         
-        # Prompt
+        # Strict JSON Prompt
         input_prompt = """
-        You are a strict Technical Recruiter. Evaluate the resume against the JD.
-        Return ONLY valid JSON:
+        You are a high-precision ATS. Analyze the resume against the JD.
+        Output ONLY raw JSON. No Markdown. No ```json.
+        Structure:
         {
             "name": "Candidate Name",
-            "score": 85,
-            "reason": "Short summary of fit",
-            "skills_missing": ["skill1", "skill2"]
+            "match_score": 85,
+            "summary": "Direct, brutal assessment of fit.",
+            "missing_skills": ["skill1", "skill2"],
+            "experience_years": 5
         }
         """
         
         results = []
         progress_text = st.empty()
-        bar = st.progress(0)
+        progress_bar = st.progress(0)
         
-        for i, file in enumerate(uploaded_files):
-            progress_text.text(f"Analyzing {file.name}...")
-            bar.progress((i+1)/len(uploaded_files))
+        # --- Queue Processing ---
+        for idx, file in enumerate(uploaded_files):
+            progress_text.text(f"Processing {idx+1}/{len(uploaded_files)}: {file.name}")
+            progress_bar.progress((idx + 1) / len(uploaded_files))
             
-            text = input_pdf_text(file)
+            file_data = None
+            is_image = False
             
-            # Retry logic
-            for _ in range(3):
+            # Detect Type
+            if file.type == "application/pdf":
+                file_data = extract_pdf_text(file)
+                is_image = False
+            else:
+                # Handle Images (JPG/PNG)
+                file_data = Image.open(file)
+                is_image = True
+            
+            # API Call with Retry
+            for attempt in range(3):
                 try:
-                    resp = get_gemini_response(input_prompt, text, jd)
+                    resp = get_gemini_response(input_prompt, file_data, jd, is_image=is_image)
                     clean_json = resp.replace("```json", "").replace("```", "").strip()
                     data = json.loads(clean_json)
-                    data['file'] = file.name
+                    
+                    # Attach file object for preview later
+                    data['file_obj'] = file 
+                    data['file_type'] = file.type
                     results.append(data)
                     break
-                except:
+                except Exception as e:
                     time.sleep(1)
-            time.sleep(0.5) # Queue throttle
-
-        bar.empty()
-        progress_text.empty()
-        
-        # Sorting
-        top_candidates = sorted(results, key=lambda x: x.get('score', 0), reverse=True)[:n_matches]
-        
-        # --- Results Display (Custom Cards) ---
-        st.markdown("---")
-        st.markdown(f"<h3 style='text-align: center;'>Top {len(top_candidates)} Matches</h3>", unsafe_allow_html=True)
-        
-        for rank, cand in enumerate(top_candidates, 1):
-            score_color = "#34C759" if cand['score'] >= 80 else "#FF9500" if cand['score'] >= 50 else "#FF3B30"
             
-            # HTML Injection for Apple-like Card
-            st.markdown(f"""
-            <div class="candidate-card">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <h2 style="margin: 0; font-size: 22px;">#{rank} {cand.get('name', 'Unknown')}</h2>
-                        <p style="color: #86868b; margin: 4px 0 0 0;">File: {cand.get('file')}</p>
-                    </div>
-                    <div style="text-align: right;">
-                        <span style="font-size: 32px; font-weight: 800; color: {score_color};">{cand.get('score')}%</span>
-                        <div style="font-size: 12px; color: #86868b; text-transform: uppercase; letter-spacing: 1px;">Match</div>
-                    </div>
-                </div>
-                <hr style="margin: 15px 0; border: 0; border-top: 1px solid #E5E5EA;">
-                <p style="font-size: 15px; line-height: 1.5;"><strong>Analysis:</strong> {cand.get('reason')}</p>
-                <p style="font-size: 14px; color: #FF3B30; margin-top: 10px;"><strong>Missing:</strong> {', '.join(cand.get('skills_missing', []))}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            time.sleep(0.5) # Rate limit buffer
+
+        progress_text.empty()
+        progress_bar.empty()
+        
+        # --- Display Results ---
+        
+        # Sort by Score (High to Low)
+        results.sort(key=lambda x: x.get('match_score', 0), reverse=True)
+        top_n = results[:n_matches]
+        
+        st.divider()
+        st.subheader(f"Top {len(top_n)} Candidates")
+        
+        for rank, cand in enumerate(top_n, 1):
+            score = cand.get('match_score', 0)
+            color = "green" if score > 75 else "orange" if score > 50 else "red"
+            
+            with st.expander(f"#{rank} | {cand.get('name')} | Match: {score}%", expanded=False):
+                
+                # Split View: Analysis vs Preview
+                c1, c2 = st.columns([1, 1])
+                
+                with c1:
+                    st.markdown(f"### Analysis")
+                    st.markdown(f"**Score:** :{color}[{score}%]")
+                    st.markdown(f"**Experience:** {cand.get('experience_years')} years")
+                    st.error(f"**Missing:** {', '.join(cand.get('missing_skills', []))}")
+                    st.info(f"**Summary:** {cand.get('summary')}")
+                
+                with c2:
+                    st.markdown("### Document Preview")
+                    f_obj = cand['file_obj']
+                    f_type = cand['file_type']
+                    
+                    if f_type == "application/pdf":
+                        # Embed PDF
+                        st.markdown(pdf_to_base64(f_obj), unsafe_allow_html=True)
+                    else:
+                        # Display Image
+                        st.image(f_obj, use_container_width=True)
